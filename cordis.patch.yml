@@ -49,3 +49,12 @@
           version: v0.43.1
           autoDownload: true
           rendererMode: auto
+        # Browser tier defaults to Obscura (Rust, own renderer, no Chromium).
+        # Point browserPath at a Chromium/Chrome binary to use --dump-dom instead.
+        browserPath: ""
+        browserEngine: auto
+        browserStealth: true
+        obscura:
+          version: v0.2.6
+          autoDownload: true
+          stealth: true

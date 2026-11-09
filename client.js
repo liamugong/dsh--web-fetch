@@ -115,6 +115,10 @@ window.__ModuleLoader__.load({
       const [testUrl, setTestUrl] = React.useState("https://example.com")
       const [testOut, setTestOut] = React.useState("")
       const [busy, setBusy] = React.useState(false)
+      const [keyDrafts, setKeyDrafts] = React.useState({})
+      const [keyMsg, setKeyMsg] = React.useState("")
+      const [browserPath, setBrowserPath] = React.useState("")
+      const [browserMsg, setBrowserMsg] = React.useState("")
 
       const apply = React.useCallback((s) => {
         if (s && s.error) setError(s.error)
@@ -146,6 +150,47 @@ window.__ModuleLoader__.load({
         order.splice(to, 0, id)
         setState({ ...state, order })
         post("/order", { order }).then(apply).catch((e) => setError(e.message))
+      }
+
+      React.useEffect(() => {
+        if (state?.browser) setBrowserPath(state.browser.path || "")
+      }, [state?.browser?.path])
+
+      const saveKey = (id) => {
+        const value = keyDrafts[id] || ""
+        setKeyMsg("")
+        post("/keys", { id, value })
+          .then((res) => {
+            if (res && res.error) throw new Error(res.error)
+            setKeyMsg(value ? "已保存" : "已清除")
+            setKeyDrafts((d) => ({ ...d, [id]: "" }))
+            refresh()
+          })
+          .catch((e) => setKeyMsg(e.message))
+      }
+
+      const browserAction = (action) => {
+        setBrowserMsg("处理中…")
+        post("/browser", { action, url: "https://example.com" })
+          .then((res) => {
+            if (res && res.error) throw new Error(res.error)
+            if (action === "download") setBrowserMsg(`已下载：${res.detected?.path || ""}`)
+            else if (action === "test") setBrowserMsg(`OK ${res.ms}ms · ${res.bytes}B · ${res.engine}`)
+            else setBrowserMsg(res.detected ? `检测到 ${res.detected.engine}：${res.detected.path}` : "未检测到可用浏览器")
+            refresh()
+          })
+          .catch((e) => setBrowserMsg(e.message))
+      }
+
+      const saveBrowserPath = () => {
+        setBrowserMsg("保存中…")
+        post("/config", { browserPath })
+          .then((res) => {
+            if (res && res.error) throw new Error(res.error)
+            setBrowserMsg("已保存")
+            apply(res)
+          })
+          .catch((e) => setBrowserMsg(e.message))
       }
 
       const toggle = (id, enabled) => {
@@ -233,6 +278,65 @@ window.__ModuleLoader__.load({
           { style: styles.actions },
           h("button", { style: styles.btn, onClick: () => post("/order", { order: ["direct", "jina", "firecrawl", "crw", "exa", "browser", "lightpanda"] }).then(apply) }, "恢复默认顺序"),
           h("button", { style: styles.btn, onClick: () => post("/test", { url: testUrl }).then(() => refresh()) }, "重新检测可用性"),
+        ),
+        h(
+          "div",
+          { style: styles.panel },
+          h("div", { style: styles.panelTitle }, "接口密钥"),
+          h("div", { style: { fontSize: 11, opacity: 0.6, marginBottom: 6 } }, "留空则自动复用 DSH 凭据里的同名 Key；这里保存的 Key 优先。"),
+          ...[
+            ["firecrawl", "Firecrawl", "FIRECRAWL_API_KEY"],
+            ["exa", "Exa Contents", "EXA_API_KEY"],
+            ["jina", "Jina Reader（可选）", "JINA_API_KEY"],
+          ].map(([id, label, env]) => {
+            const info = (state.keys && state.keys[id]) || {}
+            const badge = info.source === "plugin" ? "插件内已保存" : info.source === "external" ? "来自 DSH 凭据" : "未配置"
+            const tone = info.configured ? (info.source === "plugin" ? "ok" : "muted") : "bad"
+            return h(
+              "div",
+              { key: id, style: { display: "flex", alignItems: "center", gap: 8, marginTop: 6, flexWrap: "wrap" } },
+              h("span", { style: { width: 150, fontSize: 12 } }, label),
+              h("span", { style: styles.tag(tone) }, badge),
+              h("span", { style: { fontSize: 11, opacity: 0.5, minWidth: 70 } }, info.mask || env),
+              h("input", {
+                style: { ...styles.input, flex: 1, minWidth: 160 },
+                type: "password",
+                value: keyDrafts[id] || "",
+                placeholder: info.configured ? "已配置，输入新值可覆盖" : `粘贴 ${env}`,
+                onChange: (e) => setKeyDrafts((d) => ({ ...d, [id]: e.target.value })),
+              }),
+              h("button", { style: styles.btn, onClick: () => saveKey(id) }, "保存"),
+              h("button", { style: styles.btn, onClick: () => { setKeyDrafts((d) => ({ ...d, [id]: "" })); post("/keys", { id, value: "" }).then(refresh) } }, "清除"),
+            )
+          }),
+          keyMsg ? h("div", { style: { fontSize: 11, marginTop: 6, opacity: 0.7 } }, keyMsg) : null,
+        ),
+        h(
+          "div",
+          { style: styles.panel },
+          h("div", { style: styles.panelTitle }, "浏览器引擎"),
+          h("div", { style: { fontSize: 11, opacity: 0.6, marginBottom: 6 } }, "默认用 Obscura（Rust 自渲染，无需 Chromium）；也可以填本机 Chromium/Chrome 路径走 --dump-dom。"),
+          h(
+            "div",
+            { style: { display: "flex", gap: 8, flexWrap: "wrap" } },
+            h("input", {
+              style: { ...styles.input, flex: 1, minWidth: 240 },
+              value: browserPath,
+              placeholder: "留空 = 自动检测（优先 Obscura）",
+              onChange: (e) => setBrowserPath(e.target.value),
+            }),
+            h("button", { style: styles.btnPrimary, onClick: saveBrowserPath }, "保存路径"),
+            h("button", { style: styles.btn, onClick: () => browserAction("detect") }, "自动检测"),
+            h("button", { style: styles.btn, onClick: () => browserAction("download") }, "下载 Obscura"),
+            h("button", { style: styles.btn, onClick: () => browserAction("test") }, "测试抓取"),
+          ),
+          h(
+            "div",
+            { style: { fontSize: 11, opacity: 0.65, marginTop: 6 } },
+            `当前：${(state.browser && state.browser.detected && `${state.browser.detected.engine} · ${state.browser.detected.path}`) || "未检测到"}`
+            + (state.browser && state.browser.obscura && state.browser.obscura.version ? ` · v${state.browser.obscura.version}` : ""),
+          ),
+          browserMsg ? h("div", { style: { fontSize: 11, marginTop: 4, opacity: 0.8 } }, browserMsg) : null,
         ),
         h(
           "div",

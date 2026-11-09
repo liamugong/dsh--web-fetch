@@ -1,6 +1,6 @@
 {
   "name": "dsh--web-fetch",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Aggregated web-fetch provider for DeepSeek Harness: mix and match multiple fetch backends, drag to reorder the fallback chain, and auto-deploy a local unauthenticated CRW (fastCRW) instance when the crw tier is enabled.",
   "license": "MIT",
   "type": "module",
@@ -16,7 +16,8 @@
     "lib/",
     "cordis.patch.yml",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "bench/"
   ],
   "keywords": [
     "deepseek-harness",

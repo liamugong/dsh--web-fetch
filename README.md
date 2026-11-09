@@ -29,7 +29,9 @@ This plugin hands the ordering back to you. Drag to reorder; it takes effect imm
 
 | 能力 | 说明 |
 | --- | --- |
-| **7 个抓取后端** | 直连 HTTP、Jina Reader（免 key）、Firecrawl、fastCRW、Exa、无头浏览器、Lightpanda |
+| **7 个抓取后端** | 直连 HTTP、Jina Reader（免 key）、Firecrawl、fastCRW、Exa、无头浏览器（Obscura）、Lightpanda |
+| **API Key 内联编辑** | 卡片里直接填 Firecrawl / Exa / Jina 的 Key，保存到 `~/.dsh/dsh-web-fetch/keys.json`（0600）；留空自动复用 DSH 凭据里同名 Key |
+| **浏览器可换** | 默认 Obscura（Rust 自渲染，无需 Chromium），也可填本机 Chromium/Chrome 路径走 `--dump-dom`；一键下载 Obscura |
 | **拖动排序** | 插件卡片里 HTML5 拖拽调整回退顺序，实时写盘；每行另有 `↑` / `↓` 按钮，不方便拖拽时也能排序 |
 | **逐项开关** | 每个后端单独启用/禁用；缺 key 或缺二进制的会自动跳过 |
 | **连通性测试** | 输入 URL 一次跑完整条链，逐档显示耗时与字节数，失败附原因 |
@@ -76,7 +78,7 @@ dsh plugin --profile desktop add ./
 | `firecrawl` | Firecrawl v2 | `FIRECRAWL_API_KEY` | 反爬站、Cloudflare | `POST /v2/scrape` → markdown，最稳的一档 |
 | `crw` | fastCRW 本地 | 无（自动下载） | 想要自托管、不想用云 API | 见下节 |
 | `exa` | Exa Contents | `EXA_API_KEY` | 语义检索配套抓取 | `POST /contents` |
-| `browser` | 无头浏览器 | 本机 Chrome/Chromium | 需要 JS 渲染的页 | `--dump-dom`，**故意不加 `--user-data-dir`**（见下） |
+| `browser` | 无头浏览器 | 本机 Obscura（默认）或 Chrome/Chromium | 需要 JS 渲染的页 | Obscura 走 `fetch --dump markdown --quiet`；Chromium 走 `--dump-dom`，**故意不加 `--user-data-dir`**（见下） |
 | `lightpanda` | Lightpanda | 本机 `lightpanda` 二进制 | markdown 预处理 | 快但中文站基本全挡，不建议当主力 |
 
 ### 质量闸门 / Quality gate
@@ -85,7 +87,15 @@ dsh plugin --profile desktop add ./
 
 ### 关于无头浏览器 / About the browser tier
 
-`--headless=new --dump-dom` 与 `--user-data-dir` 同时出现时，Chromium 会在输出完 DOM 后**不退出**（[Chromium issue 547894779](https://issues.chromium.org/issues/547894779)）。所以本插件调用 `--dump-dom` 时**不传** `--user-data-dir`，避免了「等到超时」的老问题。如果你需要登录态，请改用 CRW + 常驻 CDP（见下）。
+**默认引擎是 [Obscura](https://github.com/h4ckf0r0day/obscura)**（Rust 写的无头浏览器，自带渲染引擎，不需要 Chromium）。插件会调用：
+
+```bash
+obscura fetch <url> --dump markdown --timeout <s> --allow-private-network --quiet [--stealth]
+```
+
+`--allow-private-network` + `OBSCURA_ALLOW_PRIVATE_NETWORK=1` 是必须的：Obsura 默认拦截私网地址，而 TUN/fake-IP 代理（Clash/Surge/Loon）会把公网域名解析到 `198.18.0.0/15`，不加这个开关会全部被 SSRF 拦截。
+
+也可以在卡片里把路径改成任意 Chromium/Chrome 可执行文件，此时回退到 `--headless=new --dump-dom`。注意 `--dump-dom` 与 `--user-data-dir` 同时出现时，Chromium 会在输出完 DOM 后**不退出**（[Chromium issue 547894779](https://issues.chromium.org/issues/547894779)），所以这条路径**不传** `--user-data-dir`。需要登录态请改用 CRW + 常驻 CDP。
 
 ---
 
@@ -163,9 +173,12 @@ dsh plugin --profile desktop add ./
 
 ### API Key 解析顺序 / Key resolution
 
-1. DSH `credentials` 服务（若可用）
-2. `~/.dsh/.credentials.yaml` 里的 `FIRECRAWL_API_KEY` / `EXA_API_KEY`
-3. 进程环境变量 `FIRECRAWL_API_KEY` / `EXA_API_KEY`
+1. 插件内保存的 Key（`~/.dsh/dsh-web-fetch/keys.json`，权限 0600）——卡片里「接口密钥」面板直接编辑
+2. DSH `credentials` 服务（若可用）
+3. `~/.dsh/.credentials.yaml` 里的 `FIRECRAWL_API_KEY` / `EXA_API_KEY` / `JINA_API_KEY` / `TAVILY_API_KEY`
+4. 进程环境变量同名变量
+
+> 也就是说：**在 DSH / websearch 里填过的 Firecrawl Key 会被自动复用**，卡片会显示「来自 DSH 凭据」；只有在卡片里另填一份时才会覆盖。
 
 ---
 
@@ -175,7 +188,10 @@ dsh plugin --profile desktop add ./
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/dsh-web-fetch/state` | 当前状态：顺序、开关、后端可用性、CRW 状态 |
+| GET | `/api/dsh-web-fetch/state` | 当前状态：顺序、开关、后端可用性、CRW 状态、Key 状态、浏览器状态 |
+| GET/POST | `/api/dsh-web-fetch/keys` | `{ id, value }` → 保存/清除插件内 Key；`value` 为空表示清除 |
+| POST | `/api/dsh-web-fetch/config` | `{ browserPath, browserEngine, browserStealth, timeouts }` |
+| POST | `/api/dsh-web-fetch/browser` | `{ action: "detect" \| "download" \| "test", url? }` |
 | POST | `/api/dsh-web-fetch/order` | `{ order: ["direct", ...] }` |
 | POST | `/api/dsh-web-fetch/toggle` | `{ id, enabled }` |
 | POST | `/api/dsh-web-fetch/crw` | `{ action: "start" \| "stop" \| "restart" }` |
@@ -205,6 +221,52 @@ lib/backends.js    7 个后端 + 质量闸门 + 挑战页识别
 lib/crw.js         CRW 生命周期管理（下载/配置/启停/健康检查）
 cordis.patch.yml   bundle patch（只 insert 自己那一行）
 test/harness.mjs   离线测试
+```
+
+---
+
+## 性能实测 / Benchmarks
+
+macOS 15.7.1 arm64（Apple Silicon）· obscura 0.2.6（stealth）· Chromium 140.0.7339.185 · crw 0.43.1 · Firecrawl v2。
+每个后端**单独**跑，不走回退链，因此是「这一档本身有多快」，不是「一次 web_fetch 有多快」。
+
+### 逐档：耗时 / 正文长度
+
+| 页面 | direct | jina | firecrawl | crw | browser (obscura) |
+| --- | --- | --- | --- | --- | --- |
+| example.com | 211ms / 577B | ✗ 419ms | 795ms / 959B | 361ms / 174B | 511ms / 960B |
+| mygo.egoist.dev/docs/ui | 429ms / 123KB | 417ms / 21KB | 496ms / 21KB | 360ms / 11KB | 1.3s / 15KB |
+| arxiv.org/abs/2308.00001 | 294ms / 39KB | ✗ 258ms | 1.3s / 7KB | 213ms / 5KB | 2.4s / 11KB |
+| en.wikipedia.org (Rust) | 952ms / 1.0MB | 3.3s / 261KB | 1.9s / 265KB | 757ms / 86KB | 6.7s / 195KB |
+| github.com/zed-industries/zed | 907ms / 342KB | 16.5s / 126KB | 1.0s / 23KB | 694ms / 18KB | 6.8s / 35KB |
+| stackoverflow.com/questions/11227809 | ✗ 403 | ✗ 403 | **1.7s / 193KB** | ✗ CF | ✗ CF 挑战页 |
+| www.npmjs.com/package/react | ✗ 403 | ✗ 403 | **749ms / 5.5KB** | ✗ CF | ✗ CF 挑战页 |
+| juejin.cn/post/7705441553616388146 | 181ms / 117KB | 1.0s / 26KB | 1.2s / 22KB | 145ms / 8KB | 2.0s / 10KB |
+
+**怎么读这张表**：`direct` 在能直连的站上几乎总是最快（子 200ms 级）；`crw` 在没有 Cloudflare 的站上稳定低于 `firecrawl`；`firecrawl` 是唯一能稳定啃下 Cloudflare 的一档；`browser` 只在需要真实 JS 渲染、而前三档都拿不到正文时才值得开——它是最慢的一档。
+
+### Obscura vs Chromium：单进程峰值内存与耗时
+
+`/usr/bin/time -l` 的 `maximum resident set size`，同一页面、同一台机器：
+
+| 页面 | Obscura | Chromium `--dump-dom` |
+| --- | --- | --- |
+| example.com | **0.28s / 26MB** | 1.04s / 201MB |
+| mygo.egoist.dev/docs/ui | **1.5s / 80MB** | 2.00s / 203MB |
+| arxiv.org/abs/2308.00001 | 2.04s / 74MB | **1.97s / 204MB** |
+| en.wikipedia.org (Rust) | 6.47s / 359MB | **2.80s / 232MB** |
+
+结论：**轻页面 Obscura 优势巨大**（内存约 1/8、启动快 3–4 倍，26MB vs 201MB 在同一档确实是「30MB 级」）；**重页面会反过来**（维基这种大文档它要 6.5s / 359MB，比 Chromium 慢 2 倍多、还多占 127MB）。另外 Chromium 会派生 renderer/GPU 子进程（实测 11 个进程合计 331MB），Obscura 是单进程，所以上表的差距在实际整机占用上还要再放大一些。
+
+### 复现
+
+```bash
+# 逐档对比（需要 crw 在 38210 跑着，browser 档读 state 里的路径）
+node bench/compare.mjs
+node bench/compare.mjs --urls https://example.com --repeat 3 --only direct,browser
+
+# 换 Chromium 引擎再测一遍
+BENCH_BROWSER_PATH=/Applications/Chromium.app/Contents/MacOS/Chromium node bench/compare.mjs
 ```
 
 ---

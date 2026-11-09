@@ -7,7 +7,7 @@
  * Lightpanda). Enabling the `crw` tier automatically deploys and starts a
  * local, unauthenticated fastCRW instance.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -17,8 +17,10 @@ import {
   httpRequest,
   findBrowser,
   findLightpanda,
+  detectBrowser,
 } from './lib/backends.js'
 import { CrwSupervisor } from './lib/crw.js'
+import { ObscuraManager, findObscura, managedBinaryPath } from './lib/obscura.js'
 
 export const name = 'dsh--web-fetch'
 export const inject = ['web']
@@ -40,6 +42,34 @@ function stateDir() {
 
 function statePath() {
   return join(stateDir(), 'state.json')
+}
+
+function keysPath() {
+  return join(stateDir(), 'keys.json')
+}
+
+/** Plugin-local API keys. Stored 0600 so they never leak into the repo. */
+function loadPluginKeys() {
+  try {
+    const raw = readFileSync(keysPath(), 'utf8')
+    const obj = JSON.parse(raw)
+    return obj && typeof obj === 'object' ? obj : {}
+  } catch {
+    return {}
+  }
+}
+
+function savePluginKeys(keys) {
+  mkdirSync(stateDir(), { recursive: true })
+  writeFileSync(keysPath(), JSON.stringify(keys, null, 2), { mode: 0o600 })
+  try { chmodSync(keysPath(), 0o600) } catch {}
+  return keys
+}
+
+function maskKey(value) {
+  if (!value) return ''
+  if (value.length <= 8) return '••••'
+  return `••••${value.slice(-4)}`
 }
 
 function defaultState(config = {}) {
@@ -68,6 +98,14 @@ function defaultState(config = {}) {
     },
     minChars: { accept: config.minChars?.accept ?? 400, floor: config.minChars?.floor ?? 80 },
     browserPath: config.browserPath || '',
+    browserEngine: config.browserEngine || 'auto',
+    browserStealth: config.browserStealth !== false,
+    obscura: {
+      version: config.obscura?.version || 'v0.2.6',
+      autoDownload: config.obscura?.autoDownload !== false,
+      stealth: config.obscura?.stealth !== false,
+      binaryPath: config.obscura?.binaryPath || '',
+    },
     lightpandaPath: config.lightpandaPath || '',
   }
 }
@@ -146,7 +184,15 @@ function makeKeyResolver(ctx) {
     return ''
   }
 
-  return (envName) => fromService(envName) || readCredFile()[envName] || process.env[envName] || ''
+  const localKeyFor = (envName) => {
+    const map = { FIRECRAWL_API_KEY: 'firecrawl', EXA_API_KEY: 'exa', JINA_API_KEY: 'jina', TAVILY_API_KEY: 'tavily' }
+    const id = map[envName]
+    if (!id) return ''
+    const v = loadPluginKeys()[id]
+    return typeof v === 'string' ? v : ''
+  }
+
+  return (envName) => localKeyFor(envName) || fromService(envName) || readCredFile()[envName] || process.env[envName] || ''
 }
 
 /* ------------------------------------------------------------------ */
@@ -256,6 +302,8 @@ export function apply(ctx, config = {}) {
     log,
   })
 
+  const obscuraManager = new ObscuraManager({ state, log })
+
   const runtime = {
     keys: {
       firecrawl: resolveKey('FIRECRAWL_API_KEY'),
@@ -266,6 +314,8 @@ export function apply(ctx, config = {}) {
     timeouts: state.timeouts,
     crw: supervisor,
     browserPath: state.browserPath,
+    browserStealth: state.browserStealth,
+    obscura: obscuraManager,
     lightpandaPath: state.lightpandaPath,
     log,
   }
@@ -315,6 +365,24 @@ export function apply(ctx, config = {}) {
     order: state.order,
     enabled: state.enabled,
     crw: { ...supervisor.info(), autoStart: state.crw.autoStart },
+    keys: Object.fromEntries(
+      Object.entries({ firecrawl: 'FIRECRAWL_API_KEY', exa: 'EXA_API_KEY', jina: 'JINA_API_KEY', tavily: 'TAVILY_API_KEY' }).map(([id, env]) => {
+        const local = loadPluginKeys()[id] || ''
+        const resolved = resolveKey(env)
+        return [id, {
+          configured: Boolean(resolved),
+          source: local ? 'plugin' : resolved ? 'external' : '',
+          mask: maskKey(resolved),
+        }]
+      }),
+    ),
+    browser: {
+      path: state.browserPath || '',
+      engine: state.browserEngine || 'auto',
+      stealth: state.browserStealth !== false,
+      detected: detectBrowser(state.browserPath),
+      obscura: { ...obscuraManager.info(), managedPath: managedBinaryPath() },
+    },
     backends: ALL_BACKENDS.map((b) => {
       let available = false
       let reason = ''
@@ -341,6 +409,80 @@ export function apply(ctx, config = {}) {
       handler(req, res) {
         if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' })
         sendJson(res, 200, publicState())
+      },
+    },
+    {
+      kind: 'exact',
+      path: `${API_PREFIX}/keys`,
+      async handler(req, res) {
+        if (req.method === 'GET') return sendJson(res, 200, publicState().keys)
+        if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' })
+        try {
+          const body = JSON.parse(await readBody(req))
+          const id = String(body.id || '')
+          if (!['firecrawl', 'exa', 'jina', 'tavily'].includes(id)) return sendJson(res, 400, { error: `unknown key id: ${id}` })
+          const keys = loadPluginKeys()
+          const value = typeof body.value === 'string' ? body.value.trim() : ''
+          if (value) keys[id] = value
+          else delete keys[id]
+          savePluginKeys(keys)
+          sendJson(res, 200, publicState().keys)
+        } catch (err) {
+          sendJson(res, 400, { error: err.message })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: `${API_PREFIX}/config`,
+      async handler(req, res) {
+        if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' })
+        try {
+          const body = JSON.parse(await readBody(req))
+          if (typeof body.browserPath === 'string') state.browserPath = body.browserPath.trim()
+          if (typeof body.browserEngine === 'string') state.browserEngine = body.browserEngine
+          if (typeof body.browserStealth === 'boolean') state.browserStealth = body.browserStealth
+          if (body.timeouts && typeof body.timeouts === 'object') {
+            for (const [k, v] of Object.entries(body.timeouts)) {
+              if (k in state.timeouts && Number.isFinite(Number(v))) state.timeouts[k] = Number(v)
+            }
+          }
+          saveState(state)
+          sendJson(res, 200, publicState())
+        } catch (err) {
+          sendJson(res, 400, { error: err.message })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: `${API_PREFIX}/browser`,
+      async handler(req, res) {
+        if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' })
+        try {
+          const body = JSON.parse(await readBody(req))
+          const action = String(body.action || 'detect')
+          if (action === 'detect') {
+            const found = detectBrowser(state.browserPath)
+            return sendJson(res, 200, { ok: Boolean(found), detected: found, obscura: obscuraManager.info() })
+          }
+          if (action === 'download') {
+            const bin = await obscuraManager.ensureBinary({ stealth: state.browserStealth !== false, force: Boolean(body.force) })
+            state.browserPath = bin
+            saveState(state)
+            return sendJson(res, 200, { ok: true, detected: detectBrowser(bin), obscura: obscuraManager.info() })
+          }
+          if (action === 'test') {
+            const url = String(body.url || 'https://example.com')
+            const backend = BACKEND_BY_ID.browser
+            const started = Date.now()
+            const out = await backend.fetch(url, runtimeProxy, undefined)
+            return sendJson(res, 200, { ok: true, ms: Date.now() - started, bytes: out.body.content.length, engine: detectBrowser(state.browserPath)?.engine })
+          }
+          return sendJson(res, 400, { error: `unknown action: ${action}` })
+        } catch (err) {
+          sendJson(res, 500, { error: err.message })
+        }
       },
     },
     {
