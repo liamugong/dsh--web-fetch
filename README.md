@@ -30,7 +30,7 @@ This plugin hands the ordering back to you. Drag to reorder; it takes effect imm
 | 能力 | 说明 |
 | --- | --- |
 | **7 个抓取后端** | 直连 HTTP、Jina Reader（免 key）、Firecrawl、fastCRW、Exa、无头浏览器、Lightpanda |
-| **拖动排序** | 插件卡片里 HTML5 拖拽调整回退顺序，实时写盘 |
+| **拖动排序** | 插件卡片里 HTML5 拖拽调整回退顺序，实时写盘；每行另有 `↑` / `↓` 按钮，不方便拖拽时也能排序 |
 | **逐项开关** | 每个后端单独启用/禁用；缺 key 或缺二进制的会自动跳过 |
 | **连通性测试** | 输入 URL 一次跑完整条链，逐档显示耗时与字节数，失败附原因 |
 | **质量闸门** | 结果短于阈值时不算成功，会继续尝试下一档；全部偏短则返回最长的一份 |
