@@ -86,6 +86,15 @@ dsh plugin --profile desktop add ./
 | `zhihu` | 知乎开放平台 | `ZHIHU_API_KEY` | 知乎问题/回答页 | 调 `question_answers` 接口，返回**回答摘要**（非全文）；额度默认 100 次/天 |
 | `xiaohongshu` | 小红书（Cookie） | 小红书 Cookie | 小红书笔记详情页 | 复用登录态请求页面并解析 `window.__INITIAL_STATE__`；无 Cookie 直接报错 |
 
+### 小红书 / Xiaohongshu notes
+
+小红书没有公开读接口，能跑通的只有两条路：**① 登录 Cookie 回放**（本插件默认）、**② 登录态浏览器（cdp 档）**。
+
+- 插件读取笔记页 HTML 里的 `window.__INITIAL_STATE__`，从 `note.noteDetailMap` 取标题/作者/互动数/正文/话题/图片/视频和热评。
+- **必须带 `xsec_token`**：新版笔记 URL 形如 `/explore/<id>?xsec_token=...`，少了这个参数服务端只回空壳页面。插件会保留原始查询串。
+- 页面里的状态对象不是合法 JSON（含 `undefined`、`new Map([])`），插件做了字面量清洗后再解析。
+- Cookie 至少要有 `a1` 与 `web_session`；登录后还会带 `id_token`。放进「接口密钥 → 小红书 Cookie」，或用 cdp 档指向已登录的 profile。
+
 ### 站点规则 / Site rules
 
 有些站点不该「碰运气」：通用回退链会把时间浪费在注定失败的档位上，还可能把登录墙当成正文。站点规则就是为此设计的——命中域名后**只走指定后端**，成功即返回，失败**直接报错**，绝不回退。
