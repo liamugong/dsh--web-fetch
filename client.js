@@ -41,6 +41,12 @@ window.__ModuleLoader__.load({
         opacity: dragging ? 0.5 : 1,
       }),
       grip: { opacity: 0.45, fontSize: 15, userSelect: "none", lineHeight: 1 },
+      nudge: { display: "flex", flexDirection: "column", gap: 2 },
+      nudgeBtn: {
+        width: 22, height: 18, lineHeight: "16px", padding: 0, fontSize: 11,
+        borderRadius: 4, border: "1px solid #d1d5db", background: "#fff",
+        color: "#4b5563", cursor: "pointer",
+      },
       idx: { width: 16, textAlign: "right", opacity: 0.45, fontSize: 12, fontVariantNumeric: "tabular-nums" },
       main: { flex: 1, minWidth: 0 },
       name: { fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" },
@@ -130,6 +136,18 @@ window.__ModuleLoader__.load({
         post("/order", { order }).then(apply).catch((e) => setError(e.message))
       }
 
+      const nudge = (id, delta) => {
+        if (!state) return
+        const order = state.order.slice()
+        const from = order.indexOf(id)
+        const to = from + delta
+        if (from < 0 || to < 0 || to >= order.length) return
+        order.splice(from, 1)
+        order.splice(to, 0, id)
+        setState({ ...state, order })
+        post("/order", { order }).then(apply).catch((e) => setError(e.message))
+      }
+
       const toggle = (id, enabled) => {
         setBusy(true)
         post("/toggle", { id, enabled }).then(apply).catch((e) => setError(e.message)).finally(() => setBusy(false))
@@ -187,6 +205,12 @@ window.__ModuleLoader__.load({
               b.needsKey ? h("span", { style: styles.tag("muted") }, "需要 Key") : null,
             ),
             h("div", { style: styles.desc }, b.description || ""),
+          ),
+          h(
+            "div",
+            { style: styles.nudge },
+            h("button", { style: { ...styles.nudgeBtn, opacity: i === 0 ? 0.35 : 1 }, title: "上移", onClick: () => nudge(id, -1) }, "↑"),
+            h("button", { style: { ...styles.nudgeBtn, opacity: i === state.order.length - 1 ? 0.35 : 1 }, title: "下移", onClick: () => nudge(id, 1) }, "↓"),
           ),
           h(Toggle, { on: b.enabled, onChange: (v) => toggle(id, v) }),
         )
