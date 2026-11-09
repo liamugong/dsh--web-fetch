@@ -120,6 +120,8 @@ window.__ModuleLoader__.load({
       const [browserPath, setBrowserPath] = React.useState("")
       const [browserMsg, setBrowserMsg] = React.useState("")
       const [perfMsg, setPerfMsg] = React.useState("")
+      const [ruleDraft, setRuleDraft] = React.useState({ domain: "", backend: "direct" })
+      const [ruleMsg, setRuleMsg] = React.useState("")
 
       const apply = React.useCallback((s) => {
         if (s && s.error) setError(s.error)
@@ -156,6 +158,23 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         if (state?.browser) setBrowserPath(state.browser.path || "")
       }, [state?.browser?.path])
+
+      const saveRules = (rules) => {
+        setRuleMsg("")
+        return post("/rules", { rules })
+          .then((res) => {
+            if (res && res.error) throw new Error(res.error)
+            return apply(res)
+          })
+          .catch((e) => setRuleMsg(e.message))
+      }
+
+      const addRule = () => {
+        const domain = String(ruleDraft.domain || "").trim()
+        if (!domain) { setRuleMsg("请先填域名"); return }
+        const next = [...(state.rules || []), { domain, backend: ruleDraft.backend, enabled: true, note: "" }]
+        saveRules(next).then(() => setRuleDraft({ domain: "", backend: "direct" }))
+      }
 
       const saveKey = (id) => {
         const value = keyDrafts[id] || ""
@@ -310,12 +329,65 @@ window.__ModuleLoader__.load({
         h(
           "div",
           { style: styles.panel },
+          h("div", { style: styles.panelTitle }, "站点规则 · 命中即锁定"),
+          h(
+            "div",
+            { style: { fontSize: 11, opacity: 0.6, marginBottom: 6 } },
+            "按域名后缀匹配（子域自动命中，越具体越优先）。命中规则的站点只走指定后端，失败直接报错，不回退通用链。",
+          ),
+          ...((state.rules || []).map((r, i) =>
+            h(
+              "div",
+              { key: `${r.domain}-${i}`, style: { display: "flex", alignItems: "center", gap: 8, marginTop: 6, flexWrap: "wrap" } },
+              h("span", { style: { fontSize: 12, minWidth: 170, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" } }, r.domain),
+              h("span", { style: { fontSize: 11, opacity: 0.5 } }, "→"),
+              h(
+                "select",
+                {
+                  style: { ...styles.input, minWidth: 140 },
+                  value: r.backend,
+                  onChange: (e) => saveRules((state.rules || []).map((x, j) => (j === i ? { ...x, backend: e.target.value } : x))),
+                },
+                ...(state.backends || []).map((b) => h("option", { key: b.id, value: b.id }, b.label)),
+              ),
+              h("span", { style: { fontSize: 11, opacity: 0.55, flex: 1, minWidth: 180 } }, r.note || ""),
+              h(Toggle, {
+                on: r.enabled !== false,
+                onChange: (v) => saveRules((state.rules || []).map((x, j) => (j === i ? { ...x, enabled: v } : x))),
+              }),
+              h("button", { style: styles.btn, onClick: () => saveRules((state.rules || []).filter((_, j) => j !== i)) }, "删除"),
+            ),
+          )),
+          h(
+            "div",
+            { style: { display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" } },
+            h("input", {
+              style: { ...styles.input, flex: 1, minWidth: 200 },
+              placeholder: "域名，如 xiaohongshu.com",
+              value: ruleDraft.domain,
+              onChange: (e) => setRuleDraft((d) => ({ ...d, domain: e.target.value })),
+            }),
+            h(
+              "select",
+              { style: { ...styles.input, minWidth: 140 }, value: ruleDraft.backend, onChange: (e) => setRuleDraft((d) => ({ ...d, backend: e.target.value })) },
+              ...(state.backends || []).map((b) => h("option", { key: b.id, value: b.id }, b.label)),
+            ),
+            h("button", { style: styles.btnPrimary, onClick: addRule }, "添加规则"),
+            h("button", { style: styles.btn, onClick: () => post("/rules", { action: "reset" }).then(apply) }, "恢复默认"),
+          ),
+          ruleMsg ? h("div", { style: { fontSize: 11, marginTop: 6, opacity: 0.7 } }, ruleMsg) : null,
+        ),
+        h(
+          "div",
+          { style: styles.panel },
           h("div", { style: styles.panelTitle }, "接口密钥"),
           h("div", { style: { fontSize: 11, opacity: 0.6, marginBottom: 6 } }, "留空则自动复用 DSH 凭据里的同名 Key；这里保存的 Key 优先。"),
           ...[
             ["firecrawl", "firecrawl", "FIRECRAWL_API_KEY"],
             ["exa", "Exa Contents", "EXA_API_KEY"],
             ["jina", "Jina Reader（可选）", "JINA_API_KEY"],
+            ["zhihu", "知乎开放平台", "ZHIHU_API_KEY"],
+            ["xiaohongshu", "小红书 Cookie", "document.cookie"],
           ].map(([id, label, env]) => {
             const info = (state.keys && state.keys[id]) || {}
             const badge = info.source === "plugin" ? "插件内已保存" : info.source === "external" ? "来自 DSH 凭据" : "未配置"

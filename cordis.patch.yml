@@ -33,6 +33,8 @@
           - browser
           - cdp
           - lightpanda
+          - zhihu
+          - xiaohongshu
         enabled:
           direct: true
           jina: true
@@ -42,6 +44,8 @@
           browser: false
           cdp: false
           lightpanda: false
+          zhihu: false
+          xiaohongshu: false
         crw:
           # Enabling crw auto-deploys and starts a local, unauthenticated
           # fastCRW instance bound to 127.0.0.1 (loopback only).

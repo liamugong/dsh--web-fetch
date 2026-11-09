@@ -72,6 +72,67 @@ function maskKey(value) {
   return `••••${value.slice(-4)}`
 }
 
+const KEY_ENVS = {
+  firecrawl: 'FIRECRAWL_API_KEY',
+  exa: 'EXA_API_KEY',
+  jina: 'JINA_API_KEY',
+  tavily: 'TAVILY_API_KEY',
+  zhihu: 'ZHIHU_API_KEY',
+  xiaohongshu: 'XIAOHONGSHU_COOKIE',
+}
+
+/** Domains that must never fall through the generic chain. */
+function defaultSiteRules() {
+  return [
+    {
+      domain: 'zhuanlan.zhihu.com',
+      backend: 'jina',
+      enabled: true,
+      note: '知乎专栏：开放平台没有全文接口，固定走 Jina Reader，不回退通用链。',
+    },
+    {
+      domain: 'zhihu.com',
+      backend: 'zhihu',
+      enabled: true,
+      note: '知乎问题/回答：走开放平台 question_answers API（回答摘要）。',
+    },
+    {
+      domain: 'xiaohongshu.com',
+      backend: 'xiaohongshu',
+      enabled: true,
+      note: '小红书笔记：需要登录 Cookie；没有 Cookie 会直接报错，不回退通用链。',
+    },
+  ]
+}
+
+function normalizeRule(input) {
+  if (!input || typeof input !== 'object') return null
+  const domain = String(input.domain || '').trim().toLowerCase()
+    .replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/^\*\./, '').replace(/^\./, '')
+  if (!domain || !/^[a-z0-9.-]+$/.test(domain)) return null
+  const backend = String(input.backend || '').trim()
+  if (!BACKEND_BY_ID[backend]) return null
+  return {
+    domain,
+    backend,
+    enabled: input.enabled !== false,
+    note: typeof input.note === 'string' ? input.note.slice(0, 300) : '',
+  }
+}
+
+function matchSiteRule(rules, host) {
+  if (!host || !Array.isArray(rules)) return null
+  const h = String(host).toLowerCase()
+  const candidates = rules
+    .filter((r) => r && r.enabled !== false && r.domain)
+    .sort((a, b) => b.domain.length - a.domain.length)
+  for (const r of candidates) {
+    const d = r.domain.toLowerCase()
+    if (h === d || h.endsWith(`.${d}`)) return r
+  }
+  return null
+}
+
 function defaultState(config = {}) {
   return {
     version: STATE_VERSION,
@@ -99,6 +160,8 @@ function defaultState(config = {}) {
       browser: config.timeouts?.browser ?? 20000,
       lightpanda: config.timeouts?.lightpanda ?? 25000,
       cdp: config.timeouts?.cdp ?? 45000,
+      zhihu: config.timeouts?.zhihu ?? 20000,
+      xiaohongshu: config.timeouts?.xiaohongshu ?? 25000,
     },
     minChars: { accept: config.minChars?.accept ?? 400, floor: config.minChars?.floor ?? 80 },
     // --- optimisation layer (see README "Performance") ---
@@ -130,6 +193,9 @@ function defaultState(config = {}) {
       port: config.cdp?.port ?? 9333,
       userDataDir: config.cdp?.userDataDir || '',
     },
+    siteRules: Array.isArray(config.siteRules) && config.siteRules.length
+      ? config.siteRules.map(normalizeRule).filter(Boolean)
+      : defaultSiteRules(),
   }
 }
 
@@ -139,6 +205,8 @@ function defaultEnabled(id, config) {
   // credential available. `browser` and `lightpanda` are opt-in because they
   // spawn processes.
   if (id === 'browser' || id === 'cdp' || id === 'lightpanda') return false
+  // Site-specific tiers only ever run through a site rule, never in the generic chain.
+  if (id === 'zhihu' || id === 'xiaohongshu') return false
   if (id === 'crw') return config.crw?.autoStart !== false
   return true
 }
@@ -161,6 +229,9 @@ function loadState(config) {
         affinity: { ...base.affinity, ...(saved.affinity || {}) },
         hedge: { ...base.hedge, ...(saved.hedge || {}) },
         minChars: { ...base.minChars, ...(saved.minChars || {}) },
+        siteRules: Array.isArray(saved.siteRules) && saved.siteRules.length
+          ? saved.siteRules.map(normalizeRule).filter(Boolean)
+          : base.siteRules,
       }
     }
   } catch {}
@@ -212,7 +283,14 @@ function makeKeyResolver(ctx) {
   }
 
   const localKeyFor = (envName) => {
-    const map = { FIRECRAWL_API_KEY: 'firecrawl', EXA_API_KEY: 'exa', JINA_API_KEY: 'jina', TAVILY_API_KEY: 'tavily' }
+    const map = {
+      FIRECRAWL_API_KEY: 'firecrawl',
+      EXA_API_KEY: 'exa',
+      JINA_API_KEY: 'jina',
+      TAVILY_API_KEY: 'tavily',
+      ZHIHU_API_KEY: 'zhihu',
+      XIAOHONGSHU_COOKIE: 'xiaohongshu',
+    }
     const id = map[envName]
     if (!id) return ''
     const v = loadPluginKeys()[id]
@@ -329,6 +407,41 @@ function createProvider(state, ctx2) {
       }
 
       const host = hostOf(url)
+
+      // --- site rules: a matched host never falls through the generic chain ---
+      const rule = matchSiteRule(state.siteRules, host)
+      if (rule) {
+        const backend = BACKEND_BY_ID[rule.backend]
+        const t0 = Date.now()
+        if (!backend) {
+          throw new Error(`dsh-web-fetch: 站点规则 ${rule.domain} 指向未知后端 ${rule.backend}`)
+        }
+        if (!backend.available(ctx2)) {
+          throw new Error(`dsh-web-fetch[site:${rule.domain}→${rule.backend}]: 该后端当前不可用（缺 Key/缺程序），站点规则不会回退通用链`)
+        }
+        const cap = Math.max(1000, state.timeouts?.[rule.backend] ?? 20000)
+        const ctrl = new AbortController()
+        const timer = setTimeout(() => { try { ctrl.abort(new Error('tier timeout')) } catch {} }, cap)
+        let sig
+        try { sig = signal ? AbortSignal.any([signal, ctrl.signal]) : ctrl.signal } catch { sig = ctrl.signal }
+        try {
+          const tierCtx = { ...ctx2, timeouts: { ...ctx2.timeouts, [rule.backend]: cap } }
+          const res = await backend.fetch(url, tierCtx, sig)
+          const size = res?.body?.content?.length ?? 0
+          if (!size) throw new Error('empty result')
+          bump(rule.backend, true, Date.now() - t0)
+          affinity.win(host, rule.backend)
+          ctx2.log?.(`[dsh-web-fetch] site-rule ${rule.domain} -> ${rule.backend} ok ${url} (${size}B, ${Date.now() - t0}ms)`)
+          cache.set(url, res)
+          return res
+        } catch (err) {
+          bump(rule.backend, false, Date.now() - t0)
+          throw new Error(`dsh-web-fetch[site:${rule.domain}→${rule.backend}]: ${err.message}`)
+        } finally {
+          clearTimeout(timer)
+        }
+      }
+
       const started = Date.now()
       const deadline = started + Math.max(1000, state.deadlineMs ?? 45000)
       const errors = []
@@ -512,6 +625,8 @@ export function apply(ctx, config = {}) {
       exa: resolveKey('EXA_API_KEY'),
       jina: resolveKey('JINA_API_KEY'),
       tavily: resolveKey('TAVILY_API_KEY'),
+      zhihu: resolveKey('ZHIHU_API_KEY'),
+      xiaohongshu: resolveKey('XIAOHONGSHU_COOKIE'),
     },
     timeouts: state.timeouts,
     crw: supervisor,
@@ -533,6 +648,8 @@ export function apply(ctx, config = {}) {
           exa: resolveKey('EXA_API_KEY'),
           jina: resolveKey('JINA_API_KEY'),
           tavily: resolveKey('TAVILY_API_KEY'),
+          zhihu: resolveKey('ZHIHU_API_KEY'),
+          xiaohongshu: resolveKey('XIAOHONGSHU_COOKIE'),
         }
       }
       return target[prop]
@@ -572,9 +689,10 @@ export function apply(ctx, config = {}) {
     stateDir: stateDir(),
     order: state.order,
     enabled: state.enabled,
+    rules: state.siteRules,
     crw: { ...supervisor.info(), autoStart: state.crw.autoStart },
     keys: Object.fromEntries(
-      Object.entries({ firecrawl: 'FIRECRAWL_API_KEY', exa: 'EXA_API_KEY', jina: 'JINA_API_KEY', tavily: 'TAVILY_API_KEY' }).map(([id, env]) => {
+      Object.entries(KEY_ENVS).map(([id, env]) => {
         const local = loadPluginKeys()[id] || ''
         const resolved = resolveKey(env)
         return [id, {
@@ -649,7 +767,7 @@ export function apply(ctx, config = {}) {
         try {
           const body = JSON.parse(await readBody(req))
           const id = String(body.id || '')
-          if (!['firecrawl', 'exa', 'jina', 'tavily'].includes(id)) return sendJson(res, 400, { error: `unknown key id: ${id}` })
+          if (!Object.prototype.hasOwnProperty.call(KEY_ENVS, id)) return sendJson(res, 400, { error: `unknown key id: ${id}` })
           const keys = loadPluginKeys()
           const value = typeof body.value === 'string' ? body.value.trim() : ''
           if (value) keys[id] = value
@@ -747,6 +865,33 @@ export function apply(ctx, config = {}) {
           return sendJson(res, 400, { error: `unknown action: ${action}` })
         } catch (err) {
           sendJson(res, 500, { error: err.message })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: `${API_PREFIX}/rules`,
+      async handler(req, res) {
+        if (req.method === 'GET') {
+          return sendJson(res, 200, {
+            rules: state.siteRules,
+            backends: ALL_BACKENDS.map((b) => ({ id: b.id, label: b.label, kind: b.kind })),
+          })
+        }
+        if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' })
+        try {
+          const body = JSON.parse(await readBody(req))
+          if (body.action === 'reset') {
+            state.siteRules = defaultSiteRules()
+          } else if (Array.isArray(body.rules)) {
+            state.siteRules = body.rules.map(normalizeRule).filter(Boolean)
+          } else {
+            return sendJson(res, 400, { error: 'body must be { rules: [...] } or { action: "reset" }' })
+          }
+          saveState(state)
+          sendJson(res, 200, publicState())
+        } catch (err) {
+          sendJson(res, 400, { error: err.message })
         }
       },
     },

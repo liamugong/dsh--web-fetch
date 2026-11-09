@@ -1,6 +1,6 @@
 # dsh--web-fetch
 
-> 一个给 [DeepSeek Harness](https://deepseek-harness.github.io/deepseek-harness/en/guide/quickstart) 用的**可编排网页抓取 provider**：把直连、Jina Reader、firecrawl、fastCRW、Exa、无头浏览器、Lightpanda 串成一条**你可以拖动排序**的回退链。
+> 一个给 [DeepSeek Harness](https://deepseek-harness.github.io/deepseek-harness/en/guide/quickstart) 用的**可编排网页抓取 provider**：把直连、Jina Reader、firecrawl、fastCRW、Exa、无头浏览器、CDP、Lightpanda 串成一条**你可以拖动排序**的回退链，并支持**按站点锁定专用抓取**（知乎开放平台、小红书 Cookie）。
 >
 > An **orchestratable web-fetch provider** for DeepSeek Harness: direct HTTP, Jina Reader, firecrawl, fastCRW, Exa, headless browser and Lightpanda, chained into a fallback order **you can drag to reorder**.
 
@@ -29,8 +29,9 @@ This plugin hands the ordering back to you. Drag to reorder; it takes effect imm
 
 | 能力 | 说明 |
 | --- | --- |
-| **8 个抓取后端** | 直连 HTTP、Jina Reader（免 key）、firecrawl、fastCRW、Exa、无头浏览器（Obscura）、CDP（Chromium 持久登录态）、Lightpanda |
-| **API Key 内联编辑** | 卡片里直接填 firecrawl / Exa / Jina 的 Key，保存到 `~/.dsh/dsh-web-fetch/keys.json`（0600）；留空自动复用 DSH 凭据里同名 Key |
+| **10 个抓取后端** | 直连 HTTP、Jina Reader（免 key）、firecrawl、fastCRW、Exa、无头浏览器（Obscura）、CDP（Chromium 持久登录态）、Lightpanda、知乎开放平台、小红书（Cookie） |
+| **站点规则** | 按域名后缀锁定后端：命中规则就**只走那一档、失败直接报错**，不再回退通用链。默认已配好知乎（问题/回答走开放平台 API、专栏走 Jina）与小红书 |
+| **API Key 内联编辑** | 卡片里直接填 firecrawl / Exa / Jina / 知乎的 Key 与小红书 Cookie，保存到 `~/.dsh/dsh-web-fetch/keys.json`（0600）；留空自动复用 DSH 凭据里同名 Key（知乎的 `ZHIHU_API_KEY` 就是 websearch 里那份） |
 | **浏览器可换** | 默认 Obscura（Rust 自渲染，无需 Chromium），也可填本机 Chromium/Chrome 路径走 `--dump-dom`；一键下载 Obscura |
 | **拖动排序** | 插件卡片里 HTML5 拖拽调整回退顺序，实时写盘；每行另有 `↑` / `↓` 按钮，不方便拖拽时也能排序 |
 | **逐项开关** | 每个后端单独启用/禁用；缺 key 或缺二进制的会自动跳过 |
@@ -82,6 +83,37 @@ dsh plugin --profile desktop add ./
 | `browser` | 无头浏览器 | 本机 Obscura（默认）或 Chrome/Chromium | 需要 JS 渲染的页 | Obscura 走 `fetch --dump markdown --quiet`；Chromium 走 `--dump-dom`，**故意不加 `--user-data-dir`**（见下） |
 | `cdp` | CDP 浏览器 | 本机 Chromium/Chrome | 需要登录态 / 复杂 JS | 启动一个 headless Chromium 并走 CDP 取 `outerHTML`；profile 可持久化，登录一次后续复用 |
 | `lightpanda` | Lightpanda | 本机 `lightpanda` 二进制 | markdown 预处理 | 快但中文站基本全挡，不建议当主力 |
+| `zhihu` | 知乎开放平台 | `ZHIHU_API_KEY` | 知乎问题/回答页 | 调 `question_answers` 接口，返回**回答摘要**（非全文）；额度默认 100 次/天 |
+| `xiaohongshu` | 小红书（Cookie） | 小红书 Cookie | 小红书笔记详情页 | 复用登录态请求页面并解析 `window.__INITIAL_STATE__`；无 Cookie 直接报错 |
+
+### 站点规则 / Site rules
+
+有些站点不该「碰运气」：通用回退链会把时间浪费在注定失败的档位上，还可能把登录墙当成正文。站点规则就是为此设计的——命中域名后**只走指定后端**，成功即返回，失败**直接报错**，绝不回退。
+
+规则按域名后缀匹配，子域自动命中，越具体的域名优先。默认规则：
+
+| 域名 | 后端 | 说明 |
+| --- | --- | --- |
+| `zhuanlan.zhihu.com` | `jina` | 知乎专栏：开放平台没有全文接口（`/api/v1/content/detail` 返回 `permission denied`），固定走 Jina Reader |
+| `zhihu.com` | `zhihu` | 知乎问题/回答：走开放平台 `question_answers`，返回每条回答的摘要 |
+| `xiaohongshu.com` | `xiaohongshu` | 小红书笔记：需要登录 Cookie，没有就报错 |
+
+**知乎**用的是开放平台 REST 接口，不是网页抓取：
+
+```
+GET https://developer.zhihu.com/api/v1/content/question_answers
+    ?QuestionUrl=https://www.zhihu.com/question/<id>&Offset=0&Limit=50
+Authorization: Bearer <Access Secret>
+X-Request-Timestamp: <秒级时间戳>
+```
+
+- 支持问题页 `/question/<id>` 与回答页 `/question/<id>/answer/<aid>`（后者会按 `ContentToken` 精确匹配那一条并置顶）。
+- 文档明确说明 `Summary` 是**摘要或截取文本，不代表回答全文**——插件会在输出顶部标注这一点，不会假装是全文。
+- 该接口与「问题推荐」共用「问题发现」额度，默认每租户每天 100 次（低额度账号 10 次）。额度耗尽会返回 `30001`。
+
+**小红书**没有公开读接口，两条可行路径：① 登录态 Cookie + 解析页面内嵌 `__INITIAL_STATE__`（本插件实现，也是 XHS-Downloader / xhs SDK 的思路）；② 用 `cdp` 后端挂一个登录过的浏览器。Cookie 至少需要 `a1` 与 `web_session`。
+
+> 站点规则只对**命中域名**生效；未命中的站点继续走上面的通用回退链。
 
 ### 质量闸门 / Quality gate
 
@@ -234,10 +266,10 @@ cargo build --release -p crw-server --features cdp,camoufox,cloak,impersonated
 
 1. 插件内保存的 Key（`~/.dsh/dsh-web-fetch/keys.json`，权限 0600）——卡片里「接口密钥」面板直接编辑
 2. DSH `credentials` 服务（若可用）
-3. `~/.dsh/.credentials.yaml` 里的 `FIRECRAWL_API_KEY` / `EXA_API_KEY` / `JINA_API_KEY` / `TAVILY_API_KEY`
+3. `~/.dsh/.credentials.yaml` 里的 `FIRECRAWL_API_KEY` / `EXA_API_KEY` / `JINA_API_KEY` / `TAVILY_API_KEY` / **`ZHIHU_API_KEY`**（以及 `XIAOHONGSHU_COOKIE`，可选）
 4. 进程环境变量同名变量
 
-> 也就是说：**在 DSH / websearch 里填过的 firecrawl Key 会被自动复用**，卡片会显示「来自 DSH 凭据」；只有在卡片里另填一份时才会覆盖。
+> 也就是说：**在 DSH / websearch 里填过的 firecrawl Key 与知乎 Access Secret 都会被自动复用**，卡片会显示「来自 DSH 凭据」；只有在卡片里另填一份时才会覆盖。小红书 Cookie 没有官方凭据项，需要在卡片里单独填。
 
 ---
 
@@ -252,6 +284,7 @@ cargo build --release -p crw-server --features cdp,camoufox,cloak,impersonated
 | POST | `/api/dsh-web-fetch/config` | `{ browserPath, browserEngine, browserStealth, timeouts }` |
 | POST | `/api/dsh-web-fetch/browser` | `{ action: "detect" \| "download" \| "test", url? }` |
 | POST | `/api/dsh-web-fetch/order` | `{ order: ["direct", ...] }` |
+| GET/POST | `/api/dsh-web-fetch/rules` | GET 返回规则与可选后端；POST `{ rules: [...] }` 覆盖，或 `{ action: "reset" }` 恢复默认 |
 | POST | `/api/dsh-web-fetch/toggle` | `{ id, enabled }` |
 | POST | `/api/dsh-web-fetch/crw` | `{ action: "start" \| "stop" \| "restart" }` |
 | POST | `/api/dsh-web-fetch/test` | `{ url, id? }` → 逐档耗时/字节/错误 |
@@ -283,6 +316,23 @@ test/harness.mjs   离线测试
 ```
 
 ---
+
+## 推荐配置 / Recommended setup
+
+实测下来最省时间也最省钱的一组设置（插件 v0.4.0 默认值即此）：
+
+| 项 | 值 | 理由 |
+| --- | --- | --- |
+| 顺序 | `direct → firecrawl → crw → jina → browser → cdp → lightpanda → exa` | 静态页第一档 86–250ms 命中；强 CF 站第二档 firecrawl 必过（npmjs 2.5s / SO 1.1s）；非 CF 站第三档 crw 本地免费；jina 兜底正文清洗 |
+| `exa` | 关闭 | 与 firecrawl 能力重叠，且需要单独的 key |
+| `lightpanda` | 关闭 | 中文站基本全挡，收益低 |
+| `cdp` | 关闭 | 需要常驻 Chromium（约 300–400MB），只有登录态站点才值得开 |
+| URL 缓存 | 开，TTL 10 分钟，300 条 | 二次抓取 0ms |
+| 域名亲和 | 开，30 分钟 | 记住每个站点的冠军档位，硬站省 0.6–0.85s（-27%~-44%） |
+| 前两档竞速（hedge） | 关 | 会重复请求；firecrawl 按次计费，不建议默认开 |
+| 全局 deadline | 40s | 防止单站拖死整轮；单档另有 cap |
+
+> 站点规则独立于这张表：命中规则时直接走指定后端，**不参与上面的回退链**，失败也不会降级到通用链 —— 这样知乎这类「必须走官方 API」的站点不会先白等 25 秒浏览器超时。
 
 ## 优化层 / Optimisation layer
 
