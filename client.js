@@ -119,6 +119,7 @@ window.__ModuleLoader__.load({
       const [keyMsg, setKeyMsg] = React.useState("")
       const [browserPath, setBrowserPath] = React.useState("")
       const [browserMsg, setBrowserMsg] = React.useState("")
+      const [perfMsg, setPerfMsg] = React.useState("")
 
       const apply = React.useCallback((s) => {
         if (s && s.error) setError(s.error)
@@ -167,6 +168,28 @@ window.__ModuleLoader__.load({
             refresh()
           })
           .catch((e) => setKeyMsg(e.message))
+      }
+
+      const savePerf = (patch) => {
+        setPerfMsg("保存中…")
+        post("/config", patch)
+          .then((res) => {
+            if (res && res.error) throw new Error(res.error)
+            setPerfMsg("已保存")
+            apply(res)
+          })
+          .catch((e) => setPerfMsg(e.message))
+      }
+
+      const perfAction = (action) => {
+        setPerfMsg("处理中…")
+        post("/cache", { action })
+          .then((res) => {
+            if (res && res.error) throw new Error(res.error)
+            setPerfMsg(action === "clear" ? "缓存已清空" : action === "clear-affinity" ? "域名亲和记录已清空" : "缓存与亲和记录已清空")
+            apply(res)
+          })
+          .catch((e) => setPerfMsg(e.message))
       }
 
       const browserAction = (action) => {
@@ -222,6 +245,11 @@ window.__ModuleLoader__.load({
       if (!state) return h("div", { style: styles.root }, h("div", { style: styles.subtitle }, "读取中…"))
 
       const crw = state.crw || {}
+      const perf = state.perf || {}
+      const pCache = perf.cache || {}
+      const pAff = perf.affinity || {}
+      const pHedge = perf.hedge || {}
+      const pStats = perf.stats || {}
       const rows = state.order.map((id, i) => {
         const b = (state.backends || []).find((x) => x.id === id)
         if (!b) return null
@@ -285,7 +313,7 @@ window.__ModuleLoader__.load({
           h("div", { style: styles.panelTitle }, "接口密钥"),
           h("div", { style: { fontSize: 11, opacity: 0.6, marginBottom: 6 } }, "留空则自动复用 DSH 凭据里的同名 Key；这里保存的 Key 优先。"),
           ...[
-            ["firecrawl", "Firecrawl", "FIRECRAWL_API_KEY"],
+            ["firecrawl", "firecrawl", "FIRECRAWL_API_KEY"],
             ["exa", "Exa Contents", "EXA_API_KEY"],
             ["jina", "Jina Reader（可选）", "JINA_API_KEY"],
           ].map(([id, label, env]) => {
@@ -357,6 +385,58 @@ window.__ModuleLoader__.load({
             ),
           ),
           crw.lastError ? h("pre", { style: { ...styles.mono, color: "#dc2626" } }, crw.lastError) : null,
+        ),
+        h(
+          "div",
+          { style: styles.panel },
+          h("div", { style: styles.panelTitle }, "性能与缓存"),
+          h("div", { style: { fontSize: 11, opacity: 0.6 } },
+            `本次会话：${pStats.requests || 0} 次请求 · 缓存命中 ${pStats.cacheHits || 0} 次 · 缓存条目 ${pCache.entries || 0}`),
+          h(
+            "div",
+            { style: { display: "flex", gap: 14, flexWrap: "wrap", marginTop: 6 } },
+            h(
+              "label",
+              { style: { display: "flex", alignItems: "center", gap: 6, fontSize: 12 } },
+              h(Toggle, { on: pCache.enabled !== false, onChange: (v) => savePerf({ cache: { enabled: v } }) }),
+              "URL 缓存",
+            ),
+            h("span", { style: { fontSize: 11, opacity: 0.6 } }, `TTL ${Math.round((pCache.ttlMs || 0) / 60000)} 分钟`),
+            h(
+              "label",
+              { style: { display: "flex", alignItems: "center", gap: 6, fontSize: 12 } },
+              h(Toggle, { on: pAff.enabled !== false, onChange: (v) => savePerf({ affinity: { enabled: v } }) }),
+              "域名亲和",
+            ),
+            h("span", { style: { fontSize: 11, opacity: 0.6 } }, `记住 ${Object.keys(pAff.hosts || {}).length} 个域名`),
+            h(
+              "label",
+              { style: { display: "flex", alignItems: "center", gap: 6, fontSize: 12 } },
+              h(Toggle, { on: pHedge.enabled === true, onChange: (v) => savePerf({ hedge: { enabled: v } }) }),
+              "前两档竞速",
+            ),
+          ),
+          h(
+            "div",
+            { style: { display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4, alignItems: "center" } },
+            h("span", { style: { fontSize: 11, opacity: 0.6 } }, "全局超时(ms)"),
+            h("input", {
+              style: { ...styles.input, width: 90 },
+              type: "number",
+              value: perf.deadlineMs || 45000,
+              onChange: (e) => savePerf({ deadlineMs: Number(e.target.value) || undefined }),
+            }),
+            h("span", { style: { fontSize: 11, opacity: 0.6, marginLeft: 8 } }, "缓存 TTL(分)"),
+            h("input", {
+              style: { ...styles.input, width: 70 },
+              type: "number",
+              value: Math.round((pCache.ttlMs || 600000) / 60000),
+              onChange: (e) => savePerf({ cache: { ttlMs: Math.max(0.1, Number(e.target.value) || 1) * 60000 } }),
+            }),
+            h("button", { style: styles.btn, onClick: () => perfAction("clear") }, "清空缓存"),
+            h("button", { style: styles.btn, onClick: () => perfAction("clear-affinity") }, "清空亲和"),
+          ),
+          perfMsg ? h("div", { style: { fontSize: 11, marginTop: 4, opacity: 0.75 } }, perfMsg) : null,
         ),
         h(
           "div",

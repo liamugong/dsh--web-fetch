@@ -3,7 +3,7 @@
  *
  * Registers a fetch provider (`id: "dsh-web-fetch"`) that walks a
  * user-defined, drag-orderable fallback chain across several fetch backends
- * (direct HTTP, Jina Reader, Firecrawl, Exa, local CRW, headless browser,
+ * (direct HTTP, Jina Reader, firecrawl, Exa, local CRW, headless browser,
  * Lightpanda). Enabling the `crw` tier automatically deploys and starts a
  * local, unauthenticated fastCRW instance.
  */
@@ -86,6 +86,9 @@ function defaultState(config = {}) {
       binaryPath: config.crw?.binaryPath || '',
       rendererMode: config.crw?.rendererMode || 'auto',
       chromeWsUrl: config.crw?.chromeWsUrl || '',
+      cloakBaseUrl: config.crw?.cloakBaseUrl || '',
+      cloakRecoverOnCf: config.crw?.cloakRecoverOnCf === true,
+      impersonated: config.crw?.impersonated !== false,
     },
     timeouts: {
       direct: config.timeouts?.direct ?? 20000,
@@ -95,8 +98,24 @@ function defaultState(config = {}) {
       crw: config.timeouts?.crw ?? 60000,
       browser: config.timeouts?.browser ?? 20000,
       lightpanda: config.timeouts?.lightpanda ?? 25000,
+      cdp: config.timeouts?.cdp ?? 45000,
     },
     minChars: { accept: config.minChars?.accept ?? 400, floor: config.minChars?.floor ?? 80 },
+    // --- optimisation layer (see README "Performance") ---
+    deadlineMs: config.deadlineMs ?? 45000,
+    cache: {
+      enabled: config.cache?.enabled !== false,
+      ttlMs: config.cache?.ttlMs ?? 10 * 60 * 1000,
+      maxEntries: config.cache?.maxEntries ?? 200,
+    },
+    affinity: {
+      enabled: config.affinity?.enabled !== false,
+      ttlMs: config.affinity?.ttlMs ?? 30 * 60 * 1000,
+    },
+    hedge: {
+      enabled: config.hedge?.enabled === true,
+      count: config.hedge?.count ?? 2,
+    },
     browserPath: config.browserPath || '',
     browserEngine: config.browserEngine || 'auto',
     browserStealth: config.browserStealth !== false,
@@ -107,6 +126,10 @@ function defaultState(config = {}) {
       binaryPath: config.obscura?.binaryPath || '',
     },
     lightpandaPath: config.lightpandaPath || '',
+    cdp: {
+      port: config.cdp?.port ?? 9333,
+      userDataDir: config.cdp?.userDataDir || '',
+    },
   }
 }
 
@@ -115,7 +138,7 @@ function defaultEnabled(id, config) {
   // On by default: the cheap, dependency-free tiers plus every tier that has a
   // credential available. `browser` and `lightpanda` are opt-in because they
   // spawn processes.
-  if (id === 'browser' || id === 'lightpanda') return false
+  if (id === 'browser' || id === 'cdp' || id === 'lightpanda') return false
   if (id === 'crw') return config.crw?.autoStart !== false
   return true
 }
@@ -134,6 +157,10 @@ function loadState(config) {
         enabled: { ...base.enabled, ...(saved.enabled || {}) },
         crw: { ...base.crw, ...(saved.crw || {}) },
         timeouts: { ...base.timeouts, ...(saved.timeouts || {}) },
+        cache: { ...base.cache, ...(saved.cache || {}) },
+        affinity: { ...base.affinity, ...(saved.affinity || {}) },
+        hedge: { ...base.hedge, ...(saved.hedge || {}) },
+        minChars: { ...base.minChars, ...(saved.minChars || {}) },
       }
     }
   } catch {}
@@ -196,44 +223,216 @@ function makeKeyResolver(ctx) {
 }
 
 /* ------------------------------------------------------------------ */
+/* optimisation layer: url cache + host affinity                       */
+/* ------------------------------------------------------------------ */
+function hostOf(url) {
+  try { return new URL(url).host } catch { return '' }
+}
+
+/** Small TTL + LRU cache for whole FetchResult objects. */
+function createCache(state) {
+  const map = new Map() // url -> { at, res }
+  const ttl = () => state.cache?.ttlMs ?? 600000
+  return {
+    get(url) {
+      if (state.cache?.enabled === false) return null
+      const hit = map.get(url)
+      if (!hit) return null
+      if (Date.now() - hit.at > ttl()) { map.delete(url); return null }
+      map.delete(url)
+      map.set(url, hit) // refresh recency
+      return hit.res
+    },
+    set(url, res) {
+      if (state.cache?.enabled === false) return
+      map.delete(url)
+      map.set(url, { at: Date.now(), res })
+      const max = Math.max(1, state.cache?.maxEntries ?? 200)
+      while (map.size > max) map.delete(map.keys().next().value)
+    },
+    clear() { map.clear() },
+    size() { return map.size },
+  }
+}
+
+/**
+ * Remembers, per host, which tier actually worked and which ones already failed.
+ * The winner is tried first next time; known-bad tiers are demoted to the tail
+ * (still reachable, never skipped outright — a host can change behaviour).
+ */
+function createAffinity(state) {
+  const map = new Map() // host -> { id, at, failed: string[] }
+  const ttl = () => state.affinity?.ttlMs ?? 1800000
+  const fresh = (v) => v && Date.now() - v.at <= ttl()
+  return {
+    hint(host) {
+      if (state.affinity?.enabled === false || !host) return { id: '', failed: [] }
+      const hit = map.get(host)
+      if (!fresh(hit)) { if (hit) map.delete(host); return { id: '', failed: [] } }
+      return { id: hit.id || '', failed: [...(hit.failed || [])] }
+    },
+    win(host, id) {
+      if (state.affinity?.enabled === false || !host || !id) return
+      const hit = map.get(host)
+      map.set(host, { id, at: Date.now(), failed: hit && fresh(hit) ? (hit.failed || []).filter((x) => x !== id) : [] })
+    },
+    fail(host, id) {
+      if (state.affinity?.enabled === false || !host || !id) return
+      const hit = map.get(host)
+      const failed = hit && fresh(hit) ? [...(hit.failed || [])] : []
+      if (!failed.includes(id)) failed.push(id)
+      map.set(host, { id: hit && fresh(hit) ? hit.id : '', at: Date.now(), failed })
+    },
+    snapshot() {
+      const out = {}
+      for (const [host, v] of map) if (fresh(v)) out[host] = { backend: v.id, failed: v.failed || [] }
+      return out
+    },
+    clear() { map.clear() },
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* the provider                                                        */
 /* ------------------------------------------------------------------ */
 function createProvider(state, ctx2) {
+  const cache = createCache(state)
+  const affinity = createAffinity(state)
+  const stats = { requests: 0, cacheHits: 0, tiers: {} }
+
+  const bump = (id, ok, ms) => {
+    const s = (stats.tiers[id] ||= { tries: 0, wins: 0, fails: 0, msTotal: 0 })
+    s.tries += 1
+    if (ok) s.wins += 1
+    else s.fails += 1
+    s.msTotal += ms || 0
+  }
+
   return {
     id: PROVIDER_ID,
+    stats,
+    cache,
+    affinity,
     available() {
       return true
     },
     async fetch(request, signal) {
       const url = typeof request === 'string' ? request : request?.url
       if (!url) throw new Error('dsh-web-fetch: missing url')
+      stats.requests += 1
+
+      const cached = cache.get(url)
+      if (cached) {
+        stats.cacheHits += 1
+        ctx2.log?.(`[dsh-web-fetch] cache hit ${url}`)
+        return cached
+      }
+
+      const host = hostOf(url)
+      const started = Date.now()
+      const deadline = started + Math.max(1000, state.deadlineMs ?? 45000)
       const errors = []
       const soft = []
       const minChars = state.minChars?.accept ?? 400
       const hardMin = state.minChars?.floor ?? 80
-      const chain = state.order.filter((id) => state.enabled[id] !== false && BACKEND_BY_ID[id])
-      for (const id of chain) {
+
+      // Build the chain: affinity winner first, known-bad tiers last.
+      let chain = state.order.filter((id) => state.enabled[id] !== false && BACKEND_BY_ID[id])
+      const hint = affinity.hint(host)
+      if (hint.id && chain.includes(hint.id)) chain = [hint.id, ...chain.filter((id) => id !== hint.id)]
+      if (hint.failed.length) {
+        const bad = chain.filter((id) => hint.failed.includes(id))
+        if (bad.length && bad.length < chain.length) chain = [...chain.filter((id) => !bad.includes(id)), ...bad]
+      }
+
+      const controllers = new Set()
+
+      const attempt = async (id) => {
         const backend = BACKEND_BY_ID[id]
+        const t0 = Date.now()
         let available = false
         try { available = backend.available(ctx2) } catch { available = false }
-        if (!available) { errors.push(`${id}: unavailable`); continue }
+        if (!available) {
+          bump(id, false, 0)
+          return { id, ok: false, skipped: true, ms: 0, error: `${id}: unavailable` }
+        }
+        const left = deadline - Date.now()
+        if (left <= 500) {
+          bump(id, false, 0)
+          return { id, ok: false, skipped: true, ms: 0, error: `${id}: deadline exceeded` }
+        }
+        const cap = Math.max(500, Math.min(state.timeouts?.[id] ?? 20000, left))
+        const ctrl = new AbortController()
+        controllers.add(ctrl)
+        const timer = setTimeout(() => { try { ctrl.abort(new Error('tier timeout')) } catch {} }, cap)
+        let sig
+        try { sig = signal ? AbortSignal.any([signal, ctrl.signal]) : ctrl.signal } catch { sig = ctrl.signal }
         try {
-          const res = await backend.fetch(url, ctx2, signal)
+          const tierCtx = { ...ctx2, timeouts: { ...ctx2.timeouts, [id]: cap } }
+          const res = await backend.fetch(url, tierCtx, sig)
           const size = res?.body?.content?.length ?? 0
-          if (!size) { errors.push(`${id}: empty result`); continue }
+          const ms = Date.now() - t0
+          if (!size) { bump(id, false, ms); return { id, ok: false, ms, error: `${id}: empty result` } }
           if (size >= minChars) {
-            ctx2.log?.(`[dsh-web-fetch] ${id} ok ${url} (${size}B)`)
-            return res
+            bump(id, true, ms)
+            return { id, ok: true, res, size, ms }
           }
-          // Too thin to be useful, but keep it in case every tier is thin: a
-          // genuinely tiny page is still better than a hard failure.
-          soft.push({ id, res, size })
-          errors.push(`${id}: too short (${size}B < ${minChars}B)`)
+          bump(id, false, ms)
+          return { id, ok: false, thin: true, res, size, ms, error: `${id}: too short (${size}B < ${minChars}B)` }
         } catch (err) {
-          if (signal?.aborted) throw err
-          errors.push(`${id}: ${err.message}`)
+          bump(id, false, Date.now() - t0)
+          return { id, ok: false, ms: Date.now() - t0, error: `${id}: ${err.message}` }
+        } finally {
+          clearTimeout(timer)
+          controllers.delete(ctrl)
         }
       }
+
+      const acceptResult = (r) => {
+        if (r.ok) {
+          affinity.win(host, r.id)
+          ctx2.log?.(`[dsh-web-fetch] ${r.id} ok ${url} (${r.size}B, ${r.ms}ms)`)
+          cache.set(url, r.res)
+          return r.res
+        }
+        if (r.thin) soft.push(r)
+        if (r.error) errors.push(r.error)
+        if (!r.skipped) affinity.fail(host, r.id)
+        return null
+      }
+
+      // Optional hedged head: race the first N tiers, take the first good one.
+      let rest = chain
+      if (state.hedge?.enabled && chain.length > 1) {
+        const n = Math.max(2, Math.min(state.hedge.count ?? 2, chain.length))
+        const head = chain.slice(0, n)
+        rest = chain.slice(n)
+        const winner = await new Promise((resolve) => {
+          let pending = head.length
+          let settled = false
+          for (const id of head) {
+            attempt(id).then((r) => {
+              if (!settled && r.ok) { settled = true; resolve(r); return }
+              acceptResult(r)
+              if (--pending === 0 && !settled) resolve(null)
+            })
+          }
+        })
+        if (winner) {
+          for (const c of controllers) { try { c.abort(new Error('hedge loser')) } catch {} }
+          acceptResult(winner)
+          return winner.res
+        }
+      }
+
+      for (const id of rest) {
+        if (signal?.aborted) throw new Error('aborted')
+        if (Date.now() >= deadline) { errors.push('deadline exceeded'); break }
+        const r = await attempt(id)
+        const res = acceptResult(r)
+        if (res) return res
+      }
+
       if (soft.length) {
         const best = soft.sort((a, b) => b.size - a.size)[0]
         if (best.size >= hardMin) {
@@ -299,6 +498,9 @@ export function apply(ctx, config = {}) {
     autoDownload: state.crw.autoDownload,
     rendererMode: state.crw.rendererMode,
     chromeWsUrl: state.crw.chromeWsUrl,
+    cloakBaseUrl: state.crw.cloakBaseUrl,
+    cloakRecoverOnCf: state.crw.cloakRecoverOnCf,
+    impersonated: state.crw.impersonated,
     log,
   })
 
@@ -315,6 +517,8 @@ export function apply(ctx, config = {}) {
     crw: supervisor,
     browserPath: state.browserPath,
     browserStealth: state.browserStealth,
+    cdp: state.cdp,
+    dataDir: stateDir(),
     obscura: obscuraManager,
     lightpandaPath: state.lightpandaPath,
     log,
@@ -335,11 +539,15 @@ export function apply(ctx, config = {}) {
     },
   })
 
+  let providerRef = null
+
   ctx.effect(() => {
     const provider = createProvider(state, runtimeProxy)
+    providerRef = provider
     const dispose = ctx.web.registerFetchProvider(provider)
     log(`[dsh-web-fetch] provider registered as "${PROVIDER_ID}"`)
     return () => {
+      providerRef = null
       try { typeof dispose === 'function' ? dispose() : dispose?.dispose?.() } catch {}
     }
   }, 'dsh-web-fetch: provider')
@@ -382,6 +590,27 @@ export function apply(ctx, config = {}) {
       stealth: state.browserStealth !== false,
       detected: detectBrowser(state.browserPath),
       obscura: { ...obscuraManager.info(), managedPath: managedBinaryPath() },
+    },
+    perf: {
+      deadlineMs: state.deadlineMs ?? 45000,
+      cache: {
+        enabled: state.cache?.enabled !== false,
+        ttlMs: state.cache?.ttlMs ?? 600000,
+        maxEntries: state.cache?.maxEntries ?? 200,
+        entries: providerRef ? providerRef.cache.size() : 0,
+      },
+      affinity: {
+        enabled: state.affinity?.enabled !== false,
+        ttlMs: state.affinity?.ttlMs ?? 1800000,
+        hosts: providerRef ? providerRef.affinity.snapshot() : {},
+      },
+      hedge: { enabled: state.hedge?.enabled === true, count: state.hedge?.count ?? 2 },
+      minChars: { ...state.minChars },
+      stats: {
+        requests: providerRef?.stats.requests ?? 0,
+        cacheHits: providerRef?.stats.cacheHits ?? 0,
+        tiers: providerRef?.stats.tiers ?? {},
+      },
     },
     backends: ALL_BACKENDS.map((b) => {
       let available = false
@@ -447,7 +676,43 @@ export function apply(ctx, config = {}) {
               if (k in state.timeouts && Number.isFinite(Number(v))) state.timeouts[k] = Number(v)
             }
           }
+          if (Number.isFinite(Number(body.deadlineMs))) state.deadlineMs = Math.max(1000, Number(body.deadlineMs))
+          if (body.minChars && typeof body.minChars === 'object') {
+            if (Number.isFinite(Number(body.minChars.accept))) state.minChars.accept = Math.max(1, Number(body.minChars.accept))
+            if (Number.isFinite(Number(body.minChars.floor))) state.minChars.floor = Math.max(1, Number(body.minChars.floor))
+          }
+          if (body.cache && typeof body.cache === 'object') {
+            if (typeof body.cache.enabled === 'boolean') state.cache.enabled = body.cache.enabled
+            if (Number.isFinite(Number(body.cache.ttlMs))) state.cache.ttlMs = Math.max(1000, Number(body.cache.ttlMs))
+            if (Number.isFinite(Number(body.cache.maxEntries))) state.cache.maxEntries = Math.max(1, Number(body.cache.maxEntries))
+          }
+          if (body.affinity && typeof body.affinity === 'object') {
+            if (typeof body.affinity.enabled === 'boolean') state.affinity.enabled = body.affinity.enabled
+            if (Number.isFinite(Number(body.affinity.ttlMs))) state.affinity.ttlMs = Math.max(1000, Number(body.affinity.ttlMs))
+          }
+          if (body.hedge && typeof body.hedge === 'object') {
+            if (typeof body.hedge.enabled === 'boolean') state.hedge.enabled = body.hedge.enabled
+            if (Number.isFinite(Number(body.hedge.count))) state.hedge.count = Math.min(4, Math.max(2, Number(body.hedge.count)))
+          }
           saveState(state)
+          sendJson(res, 200, publicState())
+        } catch (err) {
+          sendJson(res, 400, { error: err.message })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: `${API_PREFIX}/cache`,
+      async handler(req, res) {
+        if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' })
+        try {
+          const body = JSON.parse(await readBody(req))
+          const action = String(body.action || 'clear')
+          if (action === 'clear') providerRef?.cache.clear()
+          else if (action === 'clear-affinity') providerRef?.affinity.clear()
+          else if (action === 'clear-all') { providerRef?.cache.clear(); providerRef?.affinity.clear() }
+          else return sendJson(res, 400, { error: 'action must be clear | clear-affinity | clear-all' })
           sendJson(res, 200, publicState())
         } catch (err) {
           sendJson(res, 400, { error: err.message })

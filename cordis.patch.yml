@@ -31,6 +31,7 @@
           - crw
           - exa
           - browser
+          - cdp
           - lightpanda
         enabled:
           direct: true
@@ -39,6 +40,7 @@
           crw: true
           exa: true
           browser: false
+          cdp: false
           lightpanda: false
         crw:
           # Enabling crw auto-deploys and starts a local, unauthenticated
@@ -49,12 +51,37 @@
           version: v0.43.1
           autoDownload: true
           rendererMode: auto
+          # Stealth build only (see README "自编译 CRW"). Inert on the stock binary.
+          impersonated: true
+          cloakBaseUrl: ""
+          cloakRecoverOnCf: false
         # Browser tier defaults to Obscura (Rust, own renderer, no Chromium).
         # Point browserPath at a Chromium/Chrome binary to use --dump-dom instead.
         browserPath: ""
         browserEngine: auto
         browserStealth: true
+        # Chrome CDP tier: one resident Chrome with a persistent profile, raw
+        # DevTools protocol (no Playwright). Off by default: ~300-400MB.
+        cdp:
+          port: 9333
+          userDataDir: ""
         obscura:
           version: v0.2.6
           autoDownload: true
           stealth: true
+        # --- optimisation layer ---
+        # Hard ceiling for one web_fetch call, across every tier.
+        deadlineMs: 45000
+        cache:
+          enabled: true
+          ttlMs: 600000
+          maxEntries: 200
+        affinity:
+          # Remember which tier worked per host; demote the ones that failed.
+          enabled: true
+          ttlMs: 1800000
+        hedge:
+          # Race the first N tiers and take the first good answer.
+          # Off by default: it trades extra requests for latency.
+          enabled: false
+          count: 2

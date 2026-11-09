@@ -1,8 +1,8 @@
 # dsh--web-fetch
 
-> 一个给 [DeepSeek Harness](https://deepseek-harness.github.io/deepseek-harness/en/guide/quickstart) 用的**可编排网页抓取 provider**：把直连、Jina Reader、Firecrawl、fastCRW、Exa、无头浏览器、Lightpanda 串成一条**你可以拖动排序**的回退链。
+> 一个给 [DeepSeek Harness](https://deepseek-harness.github.io/deepseek-harness/en/guide/quickstart) 用的**可编排网页抓取 provider**：把直连、Jina Reader、firecrawl、fastCRW、Exa、无头浏览器、Lightpanda 串成一条**你可以拖动排序**的回退链。
 >
-> An **orchestratable web-fetch provider** for DeepSeek Harness: direct HTTP, Jina Reader, Firecrawl, fastCRW, Exa, headless browser and Lightpanda, chained into a fallback order **you can drag to reorder**.
+> An **orchestratable web-fetch provider** for DeepSeek Harness: direct HTTP, Jina Reader, firecrawl, fastCRW, Exa, headless browser and Lightpanda, chained into a fallback order **you can drag to reorder**.
 
 ---
 
@@ -29,13 +29,14 @@ This plugin hands the ordering back to you. Drag to reorder; it takes effect imm
 
 | 能力 | 说明 |
 | --- | --- |
-| **7 个抓取后端** | 直连 HTTP、Jina Reader（免 key）、Firecrawl、fastCRW、Exa、无头浏览器（Obscura）、Lightpanda |
-| **API Key 内联编辑** | 卡片里直接填 Firecrawl / Exa / Jina 的 Key，保存到 `~/.dsh/dsh-web-fetch/keys.json`（0600）；留空自动复用 DSH 凭据里同名 Key |
+| **8 个抓取后端** | 直连 HTTP、Jina Reader（免 key）、firecrawl、fastCRW、Exa、无头浏览器（Obscura）、CDP（Chromium 持久登录态）、Lightpanda |
+| **API Key 内联编辑** | 卡片里直接填 firecrawl / Exa / Jina 的 Key，保存到 `~/.dsh/dsh-web-fetch/keys.json`（0600）；留空自动复用 DSH 凭据里同名 Key |
 | **浏览器可换** | 默认 Obscura（Rust 自渲染，无需 Chromium），也可填本机 Chromium/Chrome 路径走 `--dump-dom`；一键下载 Obscura |
 | **拖动排序** | 插件卡片里 HTML5 拖拽调整回退顺序，实时写盘；每行另有 `↑` / `↓` 按钮，不方便拖拽时也能排序 |
 | **逐项开关** | 每个后端单独启用/禁用；缺 key 或缺二进制的会自动跳过 |
 | **连通性测试** | 输入 URL 一次跑完整条链，逐档显示耗时与字节数，失败附原因 |
 | **质量闸门** | 结果短于阈值时不算成功，会继续尝试下一档；全部偏短则返回最长的一份 |
+| **性能优化层** | URL 缓存（TTL 可调）、域名亲和（记住哪个档在这个站能用、把已失败的档降级）、全局 deadline、可选前两档并发竞速、连接复用；卡片里可开关与清空 |
 | **CRW 自动部署** | 打开 `crw` 开关即自动下载 `crw-server`（23MB 单文件）、生成配置、绑 `127.0.0.1` 启动，**无鉴权、仅回环** |
 | **运行时接管** | 插件自动把 `web.fetchProvider` 指向自己（仅当当前是空或 `http` 时，不抢占显式选择） |
 | **Web 卡片** | 设置页内可视化卡片；另有独立拖拽页 `/api/dsh-web-fetch/ui` |
@@ -75,10 +76,11 @@ dsh plugin --profile desktop add ./
 | --- | --- | --- | --- | --- |
 | `direct` | 直连 HTTP | 无 | 静态页、API、RSS | 进程内 `node:http(s)`，跟随重定向，浏览器 UA，零额外开销 |
 | `jina` | Jina Reader | 无 | 通用正文清洗 | `https://r.jina.ai/<url>`，免 key 有速率限制；输出已剥 `Title:` / `URL Source:` |
-| `firecrawl` | Firecrawl v2 | `FIRECRAWL_API_KEY` | 反爬站、Cloudflare | `POST /v2/scrape` → markdown，最稳的一档 |
+| `firecrawl` | firecrawl v2 | `FIRECRAWL_API_KEY` | 反爬站、Cloudflare | `POST /v2/scrape` → markdown，最稳的一档 |
 | `crw` | fastCRW 本地 | 无（自动下载） | 想要自托管、不想用云 API | 见下节 |
 | `exa` | Exa Contents | `EXA_API_KEY` | 语义检索配套抓取 | `POST /contents` |
 | `browser` | 无头浏览器 | 本机 Obscura（默认）或 Chrome/Chromium | 需要 JS 渲染的页 | Obscura 走 `fetch --dump markdown --quiet`；Chromium 走 `--dump-dom`，**故意不加 `--user-data-dir`**（见下） |
+| `cdp` | CDP 浏览器 | 本机 Chromium/Chrome | 需要登录态 / 复杂 JS | 启动一个 headless Chromium 并走 CDP 取 `outerHTML`；profile 可持久化，登录一次后续复用 |
 | `lightpanda` | Lightpanda | 本机 `lightpanda` 二进制 | markdown 预处理 | 快但中文站基本全挡，不建议当主力 |
 
 ### 质量闸门 / Quality gate
@@ -97,11 +99,57 @@ obscura fetch <url> --dump markdown --timeout <s> --allow-private-network --quie
 
 也可以在卡片里把路径改成任意 Chromium/Chrome 可执行文件，此时回退到 `--headless=new --dump-dom`。注意 `--dump-dom` 与 `--user-data-dir` 同时出现时，Chromium 会在输出完 DOM 后**不退出**（[Chromium issue 547894779](https://issues.chromium.org/issues/547894779)），所以这条路径**不传** `--user-data-dir`。需要登录态请改用 CRW + 常驻 CDP。
 
+### 浏览器兜底怎么选 / Which browser fallback
+
+**先别上浏览器。** `direct → jina → firecrawl → crw` 已经覆盖绝大多数站点；浏览器只在「必须执行 JS、且站点不挡」时才有价值。确实要本地兜底时，按这个顺序考虑：
+
+| 选择 | 适合 | 实测 | 代价 |
+| --- | --- | --- | --- |
+| `cdp`（本插件内置） | 登录后才有内容的站点、复杂 JS | example.com 1.2s（首次含冷启 1.7s） | 常驻 Chromium 约 300–400MB |
+| `browser` + Obscura | 无反爬的 JS 页 | 单进程 26–80MB，nowsecure.nl 7.6s | Cloudflare 一律拿挑战页 |
+| Patchright + 系统 Chrome | 想尽量过 CF | 公开基准 25/31 | 需 headful + 住宅 IP；本机机房 IP 实测仍过不了 npmjs |
+
+不建议：`nodriver`（公开基准第一 28/31，但本机实测 npmjs 只拿到「请稍候…」安全验证页，且 AGPL）、`Camoufox`（下载 1.29GB、最慢）、`lightpanda`（中文站全挡）。
+
+> 硬结论：在本机出口 IP（东京 AS205548 机房段）上，**任何本地浏览器都过不了 Cloudflare 的 JS 挑战**。要稳定过强 CF 只有云端 unblocker（firecrawl）或换住宅 IP 两条路。
+
+**怎么设：**
+
+- **CDP**：在顺序列表里打开 `cdp` 并拖到合适位置；端口默认 `9333`，`userDataDir` 留空则用 `~/.dsh/dsh-web-fetch/chrome-profile`。要登录态就先用这个 profile 手动登录一次。
+- **Obscura / Chromium**：卡片「浏览器引擎」里路径留空 = 自动检测（优先 Obscura）；填 `/Applications/Chromium.app/Contents/MacOS/Chromium` 则走 `--dump-dom`。
+
+---
+
+## 自编译 CRW（stealth 构建）/ Building CRW with stealth tiers
+
+官方预编译的 `crw-server` **没有**编译 `cdp` / `camoufox` / `cloak` / `impersonated` 特性，`/v1/capabilities` 的 `renderers.available` 是空数组，请求 `impersonated-http` 会直接报 `not available`。
+
+自编译（tag `v0.43.1`）：
+
+```bash
+cargo build --release -p crw-server --features cdp,camoufox,cloak,impersonated
+```
+
+macOS 上 `btls-sys`（BoringSSL）常会失败，报 `bcm.cc: fatal error: 'memory' file not found` —— 原因是 Command Line Tools 的 libc++ 头文件缺失。换 Homebrew LLVM 的 clang 即可：
+
+```bash
+CC=/opt/homebrew/opt/llvm/bin/clang CXX=/opt/homebrew/opt/llvm/bin/clang++ \
+CMAKE_C_COMPILER=/opt/homebrew/opt/llvm/bin/clang CMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++ \
+cargo build --release -p crw-server --features cdp,camoufox,cloak,impersonated
+```
+
+编出来的二进制约 26MB，`renderers.available` 会变成 `["impersonated-http"]`。实测边界：
+
+- `impersonated-http` 只解决 **TLS 指纹**，解决不了 Cloudflare 的 JS 挑战（npmjs / Stack Overflow 仍报 anti-bot block）。
+- `cloak` / `camoufox` 是**外部 REST sidecar**（CloakBrowser 服务 + 住宅代理 / Camoufox 服务），本机没有，所以属于「能力已编进去、但暂时没有后端可用」。
+
+把编好的二进制放到 `~/.dsh/dsh-web-fetch/bin/crw-server-stealth`，并在 `state.json` 里把 `crw.binaryPath` 指过去即可（插件不会覆盖已存在的 `binaryPath`）。
+
 ---
 
 ## CRW：本地无鉴权部署 / Local unauthenticated CRW
 
-[fastCRW](https://github.com/fastcrw/crw) 是一个 Rust 写的单文件爬虫服务（Firecrawl 兼容 API，AGPL-3.0）。
+[fastCRW](https://github.com/fastcrw/crw) 是一个 Rust 写的单文件爬虫服务（firecrawl 兼容 API，AGPL-3.0）。
 
 打开 `crw` 开关后，插件会：
 
@@ -167,6 +215,17 @@ obscura fetch <url> --dump markdown --timeout <s> --allow-private-network --quie
     minChars:
       accept: 400              # 低于此值视为「不够用」，继续下一档
       floor: 80                # 全部失败时，低于此值才硬报错
+    deadlineMs: 45000          # 一次 fetch 的总预算，跨所有档；到点即停
+    cache:                     # 同一 URL 的整份结果缓存
+      enabled: true
+      ttlMs: 600000            # 10 分钟
+      maxEntries: 200          # LRU 上限
+    affinity:                  # 域名 → 档位记忆
+      enabled: true
+      ttlMs: 1800000           # 30 分钟
+    hedge:                     # 前 N 档并发竞速（默认关：用请求数换延迟）
+      enabled: false
+      count: 2
     browserPath: ""            # 留空自动探测 Chromium / Chrome / Thorium / Edge
     lightpandaPath: ""         # 留空从 PATH 找 lightpanda
 ```
@@ -178,7 +237,7 @@ obscura fetch <url> --dump markdown --timeout <s> --allow-private-network --quie
 3. `~/.dsh/.credentials.yaml` 里的 `FIRECRAWL_API_KEY` / `EXA_API_KEY` / `JINA_API_KEY` / `TAVILY_API_KEY`
 4. 进程环境变量同名变量
 
-> 也就是说：**在 DSH / websearch 里填过的 Firecrawl Key 会被自动复用**，卡片会显示「来自 DSH 凭据」；只有在卡片里另填一份时才会覆盖。
+> 也就是说：**在 DSH / websearch 里填过的 firecrawl Key 会被自动复用**，卡片会显示「来自 DSH 凭据」；只有在卡片里另填一份时才会覆盖。
 
 ---
 
@@ -225,9 +284,32 @@ test/harness.mjs   离线测试
 
 ---
 
+## 优化层 / Optimisation layer
+
+抓取慢往往不是慢在「发请求」，而是慢在**为必然失败的档付全额超时**。这一层专门解决它：
+
+| 机制 | 作用 | 默认 |
+| --- | --- | --- |
+| **URL 缓存** | 同一 URL 的整份 `FetchResult` 直接命中，0ms | 开，TTL 10 分钟，LRU 200 条 |
+| **域名亲和** | 记住每个域名上「哪个档真的成功过」；下次把它提到第一位，并把已经失败过的档降到队尾 | 开，TTL 30 分钟 |
+| **全局 deadline** | 一次 `fetch()` 的总预算，跨所有档共享；每档实际超时 = `min(该档配置, 剩余预算)` | 45s |
+| **前 N 档并发竞速** | `direct` 与 `jina` 同时发，谁先给出合格结果用谁，其余立刻 abort | 关（省 200–500ms，但打两份请求） |
+| **连接复用** | HTTP/HTTPS Agent keep-alive，同一 origin 二次请求省约 120ms | 恒定开启 |
+| **结构信号质量闸门** | 命中 Cloudflare / 登录墙文案的结果一律判失败，不再被当成正文 | 恒定开启 |
+
+实测收益（同一台机器，2026-11）：
+
+- npmjs 首次访问 1,636ms → 命中亲和后直接走 firecrawl，约 **920ms**（-44%）。
+- 同一 URL 二次抓取：**0ms**（缓存）。
+- 硬站最坏耗时从「每档各自超时累加 ~45s+」收敛到**受 deadline 约束的 15s 内**。
+
+卡片里的「性能与缓存」面板可以开关缓存/亲和/竞速、改 TTL 与 deadline、清空缓存或亲和记录；对应 `POST /api/dsh-web-fetch/config` 与 `POST /api/dsh-web-fetch/cache`。
+
+---
+
 ## 性能实测 / Benchmarks
 
-macOS 15.7.1 arm64（Apple Silicon）· obscura 0.2.6（stealth）· Chromium 140.0.7339.185 · crw 0.43.1 · Firecrawl v2。
+macOS 15.7.1 arm64（Apple Silicon）· obscura 0.2.6（stealth）· Chromium 140.0.7339.185 · crw 0.43.1 · firecrawl v2。
 每个后端**单独**跑，不走回退链，因此是「这一档本身有多快」，不是「一次 web_fetch 有多快」。
 
 ### 逐档：耗时 / 正文长度
@@ -292,4 +374,4 @@ MIT —— 但 `crw` 二进制由 [fastcrw/crw](https://github.com/fastcrw/crw) 
 - [DeepSeek Harness 插件开发文档](https://deepseek-harness.github.io/deepseek-harness/en/develop/basic/)
 - [fastCRW](https://github.com/fastcrw/crw)
 - [Jina Reader](https://jina.ai/reader/)
-- [Firecrawl](https://firecrawl.dev/)
+- [firecrawl](https://firecrawl.dev/)
