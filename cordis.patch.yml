@@ -1,0 +1,51 @@
+# dsh--web-fetch — aggregated web-fetch provider
+#
+# This file is the `dsh.bundle.patch` layer of the package. Installing through
+# the official CLI appends this package to `dsh.profile.bundles`, and the
+# profile boot merges the single `insert` below — no manual profile edits.
+#
+#   dsh plugin --profile <name> add dsh--web-fetch
+#
+# Deliberately NOT setting `- id: web / config: fetchProvider: ...` here:
+# a patch replaces the whole row config, so a static value would leave a
+# dangling provider reference whenever this plugin is disabled. The plugin
+# instead claims `web.fetchProvider` at runtime when it is unset or still the
+# shipped default (`http`), exactly like dsh-free-search claims the search
+# provider. If another provider was chosen explicitly, set this in the
+# profile's cordis.patch.yml instead (keeping every other `web.*` field):
+#
+#   - id: web
+#     config:
+#       searchProvider: ddg
+#       fetchProvider: dsh-web-fetch
+#
+- insert:
+    - id: web-fetch
+      name: dsh--web-fetch
+      config:
+        # Fallback chain, first entry wins. Drag to reorder in the plugin card.
+        order:
+          - direct
+          - jina
+          - firecrawl
+          - crw
+          - exa
+          - browser
+          - lightpanda
+        enabled:
+          direct: true
+          jina: true
+          firecrawl: true
+          crw: true
+          exa: true
+          browser: false
+          lightpanda: false
+        crw:
+          # Enabling crw auto-deploys and starts a local, unauthenticated
+          # fastCRW instance bound to 127.0.0.1 (loopback only).
+          autoStart: true
+          host: 127.0.0.1
+          port: 38210
+          version: v0.43.1
+          autoDownload: true
+          rendererMode: auto

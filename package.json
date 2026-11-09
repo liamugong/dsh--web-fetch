@@ -1,0 +1,59 @@
+{
+  "name": "dsh--web-fetch",
+  "version": "0.1.0",
+  "description": "Aggregated web-fetch provider for DeepSeek Harness: mix and match multiple fetch backends, drag to reorder the fallback chain, and auto-deploy a local unauthenticated CRW (fastCRW) instance when the crw tier is enabled.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib/",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "web-fetch",
+    "fetch-provider",
+    "crw",
+    "fastcrw",
+    "firecrawl",
+    "jina",
+    "scraper"
+  ],
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.4"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-web": ">=0.1.0-rc.6"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-web": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "dsh": ">=0.2.0-rc.1 <0.3.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
+    }
+  }
+}
